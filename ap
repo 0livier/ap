@@ -1,0 +1,388 @@
+#!/usr/bin/perl -w
+
+$main::VERSION = '1.0.0';
+
+use strict;
+
+use Getopt::Long qw(:config auto_version);
+use Pod::Usage;
+use File::Spec;
+
+use Term::UI;
+use Term::ReadLine;
+use Term::ANSIColor qw(:constants);
+
+use POSIX qw(cuserid);
+
+use IO::Socket;
+
+use Data::Dumper;
+
+my %apachectl_commands = map { $_ => 1 }
+  qw/start restart stop graceful graceful-stop/;
+
+my %available_commands = map { $_ => 1 }
+  qw/list create delete status/;
+
+my %options = (
+               'configuration-path'  => "$ENV{HOME}/etc/apache",
+               'temporary-directory' => File::Spec->tmpdir(),
+               'apache2ctl'          => 'apache2ctl', # assume it's in the PATH,
+               'port'                => 10000,
+               'template'            => '_template',
+              );
+
+GetOptions( \%options,
+          qw:help|h man|m port=i path=s configuration-path=s template temporary-directory=s quiet:
+          ) or pod2usage(2);
+
+pod2usage(1) if $options{help};
+pod2usage( -exitstatus => 0, -verbose => 2 ) if $options{man};
+
+$Term::UI::VERBOSE = 0;
+my $term           = Term::ReadLine->new('brand');
+my $configurations = parse_configuration_files();
+
+push @ARGV, 'list' if $#ARGV < 0;
+unshift @ARGV, 'restart' if $$configurations{ $ARGV[0] };
+pod2usage(1) unless $available_commands{ $ARGV[0] } || $apachectl_commands{ $ARGV[0] };
+
+for ( shift @ARGV ) {
+  m/^list?$/i         && do { list(); last; };
+  m/^create?$/i       && do { create(@ARGV); last; };
+  m/^delete?$/i       && do { del(@ARGV); last; };
+  $apachectl_commands{$_} && do { apache( $_, @ARGV ); last; };
+}
+
+
+sub apache {
+  my ( $action, $config ) = (@_);
+
+  die("No configuration name given.\n") unless $config;
+  die("Can't find $config in available configuration files.\n") unless exists $$configurations{$config};
+
+  my $filename =
+    File::Spec->catfile( $options{'configuration-path'}, $config . '.conf' );
+
+  system( $options{apache2ctl}, "-d $options{'configuration-path'}",
+          "-f $filename", "$action" ) == 0
+            or die "Error while doing $action for $config : $?";
+}
+
+sub list {
+  print "Available configuration files in $options{'configuration-path'} (ignoring _* files):\n";
+  print "None\n" if 0 == scalar keys %$configurations;
+  print(
+        '  ',
+        ( $$configurations{$_}{running} ? BOLD GREEN '✔' : BOLD RED '✖' ),
+        RESET,
+        BOLD," $_ ",
+        RESET "port ",
+        $$configurations{$_}{port} || 'no port defined?',
+        "\n"
+       ) for keys %$configurations;
+}
+
+sub create {
+  my ( $config, $path, $port ) = (@_);
+
+  unless ($config) {
+    File::Spec->rel2abs( File::Spec->curdir() ) =~ m:([^/]+)/([^/]+)/?$:;
+    $config = $1 if $2 eq 'htdocs' || $2 eq 'public' || $2 eq 'www';
+    $config = $2 unless $config;
+  }
+
+  unless ($path) {
+    $path = File::Spec->rel2abs( File::Spec->curdir() );
+    for (qw(www htdocs public)) {
+      if ( -d File::Spec->catdir( $path, $_ ) ) {
+        $path = File::Spec->catdir( $path, $_ );
+        last;
+      }
+    }
+  }
+
+  $port = find_an_unused_port() unless $port;
+
+  if ( $config && $path && $port ) {
+    print("Instance parameters :\n",
+          " - Name          : $config\n",
+          " - Document root : $path\n",
+          " - Port          : $port\n");
+
+    if($term->ask_yn(
+                     prompt   => "Create an instance using those parameters ?",
+                     default => 'y'
+                    )) {
+      create_config($config, $path, $port);
+      return;
+    }
+  }
+
+  while (1) {
+    $config = $term->get_reply( prompt => "Name?", default => $config );
+    $path = $term->get_reply( prompt => "Document root?", default => $path );
+    $port = $term->get_reply( prompt => "Port?",          default => $port );
+
+    if($term->ask_yn(
+                     prompt   => "Create an instance using those parameters ?",
+                     default => 'y'
+                    )) {
+      create_config($config, $path, $port);
+      return;
+    }
+  }
+}
+
+sub create_config {
+  my ( $config, $path, $port, $template ) = (@_, '_template');
+  my $source = File::Spec->catfile($options{'configuration-path'}, $options{'template'} . '.conf');
+  my $destination = File::Spec->catfile($options{'configuration-path'}, $config . '.conf');
+
+  return if (-f $destination && ! $term->ask_yn(prompt=>"Overwrite $destination ?", default => "y"));
+
+  open(my $sfh, "<", $source) or die "Can't open template $source : $!";
+  open(my $dfh, ">", $destination) or die "Can't open destination file $destination : $!";
+
+  while(<$sfh>) {
+    s:\$NAME:$config:g;
+    s:\$PORT:$port:g;
+    s:\$PATH:$path:g;
+    s:\$TEMP:$options{'temporary-directory'}:g;
+    s.\$USER.POSIX::cuserid();.e;
+    print $dfh $_;
+  }
+
+  close($sfh);
+  close($dfh);
+}
+
+
+sub detect_current_project {
+  File::Spec->rel2abs(File::Spec->curdir()) =~ m:([^/]+)$:;
+  return $1 if $$configurations{$1};
+}
+
+sub del {
+  my $config = shift;
+  $config = detect_current_project() unless $config;
+  die("No configuration name given for deletion.\n") unless $config;
+  die("Can't find $config in available configuration files.\n") unless exists $$configurations{$config};
+  unlink $$configurations{$config}{filename} if $term->ask_yn(prompt=>"Delete $config configuration ?", default => "y");
+}
+
+sub find_an_unused_port {
+  my %used_ports;
+
+  $used_ports{ $$configurations{$_}{port} || -1 } = 1 for keys %$configurations;
+  my $port = $options{port};
+  $port++
+    while (
+           $port < 65535
+           && (
+               ! new IO::Socket::INET(
+                                    LocalHost => 'localhost',
+                                    LocalPort => $port,
+                                    Proto     => 'tcp'
+                                   )
+               || $used_ports{$port}
+              )
+          );
+
+  # test if port is really available
+  return $port;
+}
+
+# Not a real parsing, just a few string matching so real mayem can occur
+# if a file contains a keyword used in an unexpected way
+sub parse_configuration_file {
+  open( my $fh, $_[0] ) or die "Can't open @_ : $!";
+  my $lines = join "\n", <$fh>;
+  my $result = {
+                filename      => $_[0],
+                running       => undef,
+                port          => undef,
+                document_root => undef,
+               };
+
+  $lines =~ m/^\s*Listen\s*(\d+)\s*$/mi && do {
+    $$result{port} = $1;
+  };
+
+  $lines =~ m/^\s*DocumentRoot\s*(.+)\s*$/mi && do {
+    $$result{document_root} =
+      File::Spec->rel2abs( $1, $options{'configuration-path'} );
+  };
+
+  $lines =~ m/^\s*PidFile\s*(.+)\s*+/mi && do {
+    $$result{running} =
+      File::Spec->rel2abs( $1, $options{'configuration-path'} );
+    if ( -f $$result{running} && -r $$result{running} ) {
+      open( my $pidfh, $$result{running} );
+      # is there a process with that pid ?
+      # we could have tested for apache/httpd
+      $$result{running} = kill 0, <$pidfh>;
+      close $pidfh;
+    } else {
+      $$result{running} = 0;
+    }
+  };
+
+  close $fh;
+
+  $result;
+}
+
+sub parse_configuration_files {
+  my $result = {};
+  for ( @_ || available_files() ) {
+    m:.+/([^/]+).conf$:;
+    $$result{$1} = parse_configuration_file($_);
+  }
+  $result;
+}
+
+sub available_files {
+  grep { -r $_ && ( -f $_ || -l $_ ) } # do we deal with something readable ?
+    grep {
+      !m:/_[^/]+.conf$:
+    } # files starting with _ are considered special (i.e. templates/includes)
+      File::Spec->no_upwards(
+                             glob( File::Spec->catfile( $options{'configuration-path'}, '*.conf' ) )
+                            );
+}
+
+sub say {
+  print @_, "\n" unless $options{quiet};
+}
+
+__DATA__
+
+
+# if all params needed are ok, propose action. if not ok, ask for all params do while(1)
+
+__END__
+
+=head1 NAME
+
+ap - Apache instance management
+
+=head1 SYNOPSIS
+
+ap [options] action [file ...]
+
+=head1 SUMMARY
+
+I<ap> is a program that help regular users to organize and manage their
+ Apache daemons independently of a server that could be managed by
+ root on the machine. This tool was made with the following goals :
+
+=over 2
+
+=item * Allow developers to work easily on multiple web sites at once, or on a shared development server
+
+=item * Permit URL sharing between persons (read : do not mess with DNS/hostnames)
+
+=item * Prefer simplicity/convention over configuration, but customization should still be possible
+
+=item * Try to detect automatically technical elements (i.e. project name, path, port)
+
+=back
+
+I<ap> permits to start or stop a Apache daemon for each web site using
+dedicated configuration files which are stored (by default) in
+_$HOME/etc/apache_. A file template is used for the creation of
+configurations. The resulting files should be as small as possible, 
+focusing on the web site specifics, while the common configurations 
+elements are loaded using the Include function.
+
+You may find exemples with I<ap> either in its documentation directory or at I<ap> homepage : L<http://github.com/0livier/ap>
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<list>
+
+Lists all available configuration. Works also if I<ap> is run without any command.
+
+=item B<create [NAME [PATH [PORT]]] >
+
+Creates a new configuration file using supplied parameters. I<ap> will guess missing parameters and ask for confirmations : it will find an unused port and if your current directory contains a www, public or htdocs subdirectory, it may be used as the C<DocumentRoot>. The default template F<_template.conf> will be used by default, with the following modifications :
+
+$NAME, replaced by the name of configuration
+
+$PORT, replaced by the port of Apache daemon
+
+$PATH, replaced by the PATH supplied (should be the DocumentRoot)
+$TEMP, replaced by shell environment's C<TMPDIR> if defined or F</tmp>
+
+$USER, replaced by the login name of user
+
+=item B<start|restart|stop [NAME]>
+
+Start, restart or stop the Apache daemon for the specified configuration. If none is given, I<ap> will try to figure out which one to use according to the current/working directory.
+
+=item B<delete NAME>
+
+Deletes the specified configuration file.
+
+=item B<--configuration-path DIRECTORY>
+
+Tells where configurations is stored.
+
+=item B<--apache2ctl COMMAND>
+
+Defines which apache2ctl command to use. Defaults to apache2ctl.
+
+=item B<--port PORT>
+
+Sets the first port to try if none is defined when using create command.
+
+=item B<--template NAME>
+
+Indicates which file to use as a template for create command.
+
+=item B<--help>
+
+Prints a brief help message and exits.
+
+=item B<--man>
+
+Prints the manual page and exits.
+
+=back
+
+=head1 TYPICAL CONFIGURATION FILE
+ 
+ 
+ Include _common.conf
+ 
+ DocumentRoot /home/olivier/Code/psychologue.pro/public
+ Listen 10000
+ 
+ LockFile pids/psychologue.pro.lock
+ PidFile /tmp/psychologue.pro.pid
+ ErrorLog logs/psychologue.pro_error.log
+ CustomLog logs/psychologue.pro_access.log vhost_combined
+
+=head1 SEE ALSO
+
+apache2(8), apache2ctl(8), L<http://github.com/0livier/ap>
+
+=head1 AUTHOR
+
+Olivier Garcia <olivier@creativ-it.net>
+
+=head1 COPYRIGHT, LICENSE AND DISCLAIMER
+
+Copyright (c) 2011 creativ-IT L<http://creativ-it.net>
+
+This program is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+This program is distributed in the hope that it will be useful, but
+without any warranty; without even the implied warranty of
+merchantability or fitness for a particular purpose.
+
+=cut
