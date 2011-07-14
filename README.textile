@@ -1,0 +1,52 @@
+h1. AP
+
+*ap* is a program that help regular users to organize and manage their
+ Apache daemons independently of a server that could be managed by
+ root on the machine. This tool was made with the following goals :
+
+* Allow developers to work easily on multiple web sites at once, or on a shared development server
+* Permit URL sharing between persons (read : do not mess with DNS/hostnames)
+* Prefer simplicity/convention over configuration, but customization should still be possible
+* Try to detect automatically technical elements (i.e. project name, path, port)
+
+*ap* permits to start or stop a Apache daemon for each web site using
+dedicated configuration files which are stored (by default) in
+_$HOME/etc/apache_. A file template is used for the creation of
+configurations. The resulting files should be as small as possible, 
+focusing on the web site specifics, while the common configurations 
+elements are loaded using the Include function.
+
+h2. Installation and usage
+
+* Copy ap into your bin/ directory, make sure that directory is in your PATH.
+* Create configuration and logs directories : <pre><code>mkdir -p ~/etc/apache/{logs,pids}</code></pre>
+* Copy the common configuration and template example into ~/etc/apache
+* Adjust those files to your distributions if needed
+* Go the your project directory
+* Create your first configuration : <pre><code>ap create</code></pre>
+* Spawn the Apache daemon : <pre><code>ap start PROJECTNAME</code></pre>
+
+h2. Typical configuration file
+
+<pre>
+<code>
+Include _common.conf
+DocumentRoot /home/olivier/Code/psychologue.pro/public
+Listen 10000
+LockFile pids/psychologue.pro.lock
+PidFile /tmp/ap_olivier_psychologue.pro.pid
+ErrorLog logs/psychologue.pro_error.log
+CustomLog logs/psychologue.pro_access.log vhost_combined
+</code>
+</pre>
+
+h2. Copyright, license and disclaimer
+
+Copyright (c) 2011 "creativ-IT":http://creativ-it.net
+
+This program is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+This program is distributed in the hope that it will be useful, but
+without any warranty; without even the implied warranty of
+merchantability or fitness for a particular purpose.
