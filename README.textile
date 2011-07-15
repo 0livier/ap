@@ -26,12 +26,15 @@ h2. Typical configuration file
 Include _common.conf
 DocumentRoot /home/olivier/Code/psychologue.pro/public
 Listen 10000
-LockFile pids/psychologue.pro.lock
 PidFile /tmp/ap_olivier_psychologue.pro.pid
 ErrorLog logs/psychologue.pro_error.log
 CustomLog logs/psychologue.pro_access.log vhost_combined
 </code>
 </pre>
+
+h2. To do
+
+* Zsh and/or Bash completion
 
 h2. History, copyright, license and disclaimer
 
