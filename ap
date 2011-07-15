@@ -44,6 +44,9 @@ my $term           = Term::ReadLine->new('brand');
 my $configurations = parse_configuration_files();
 
 push @ARGV, 'list' if $#ARGV < 0;
+($ARGV[1], $ARGV[0]) = ($ARGV[0], $ARGV[1]) if defined($ARGV[1])
+  && $$configurations{ $ARGV[0] }
+  && ($available_commands{ $ARGV[1] } || $apachectl_commands{ $ARGV[1] });
 unshift @ARGV, 'restart' if $$configurations{ $ARGV[0] };
 pod2usage(1) unless $available_commands{ $ARGV[0] } || $apachectl_commands{ $ARGV[0] };
 
@@ -65,7 +68,7 @@ sub apache {
     File::Spec->catfile( $options{'configuration-path'}, $config . '.conf' );
 
   system( $options{apache2ctl}, "-d $options{'configuration-path'}",
-          "-f $filename", "$action" ) == 0
+          "-f $filename", "-k $action" ) == 0
             or die "Error while doing $action for $config : $?";
 }
 
@@ -361,8 +364,7 @@ Prints the manual page and exits.
  DocumentRoot /home/olivier/Code/psychologue.pro/public
  Listen 10000
  
- LockFile pids/psychologue.pro.lock
- PidFile /tmp/psychologue.pro.pid
+ PidFile /tmp/ap_olivier_psychologue.pro.pid
  ErrorLog logs/psychologue.pro_error.log
  CustomLog logs/psychologue.pro_access.log vhost_combined
 
