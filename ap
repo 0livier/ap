@@ -97,7 +97,7 @@ sub create {
 
   unless ($path) {
     $path = File::Spec->rel2abs( File::Spec->curdir() );
-    for (qw(www htdocs public)) {
+    for (qw(www htdocs public web)) {
       if ( -d File::Spec->catdir( $path, $_ ) ) {
         $path = File::Spec->catdir( $path, $_ );
         last;
